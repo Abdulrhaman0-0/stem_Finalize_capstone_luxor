@@ -3,6 +3,7 @@
 // Spec v1.2 - Smart Traffic Intersection with MQTT
 // ============================================================================
 
+#include <Arduino.h>
 #include <WiFi.h>
 #include <AsyncMQTT_ESP32.h>
 #include <ArduinoJson.h>
@@ -370,20 +371,39 @@ void onMqttDisconnect(AsyncMqttClientDisconnectReason reason) {
 // ============================================================================
 void WiFiEvent(WiFiEvent_t event) {
   switch(event) {
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      Serial.println("[WiFi] Connected!");
+      Serial.print("[WiFi] IP: ");
+      Serial.println(WiFi.localIP());
+      xTimerStop(wifiReconnectTimer, 0);
+      xTimerStart(mqttReconnectTimer, 0);
+      break;
+
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      Serial.println("[WiFi] Disconnected!");
+      enterFailsafe();
+      xTimerStop(mqttReconnectTimer, 0);
+      xTimerStart(wifiReconnectTimer, 0);
+      break;
+
+#ifdef SYSTEM_EVENT_STA_GOT_IP
+    // Legacy aliases for older ESP32 core releases
     case SYSTEM_EVENT_STA_GOT_IP:
       Serial.println("[WiFi] Connected!");
       Serial.print("[WiFi] IP: ");
       Serial.println(WiFi.localIP());
+      xTimerStop(wifiReconnectTimer, 0);
       xTimerStart(mqttReconnectTimer, 0);
       break;
-      
+
     case SYSTEM_EVENT_STA_DISCONNECTED:
       Serial.println("[WiFi] Disconnected!");
       enterFailsafe();
       xTimerStop(mqttReconnectTimer, 0);
       xTimerStart(wifiReconnectTimer, 0);
       break;
-      
+#endif
+
     default:
       break;
   }
@@ -398,7 +418,24 @@ void connectToMqtt() {
 }
 
 void connectToWifi() {
-  Serial.println("[WiFi] Connecting...");
+  // Avoid the "wifi:sta is connecting, cannot set config" churn by ensuring we
+  // start from a clean STA state before reconnect attempts.
+  if (WiFi.isConnected()) {
+    Serial.println("[WiFi] Already connected - skipping new attempt");
+    return;
+  }
+
+  // Warn if the placeholder credentials are still present so the user gets a
+  // clear hint about why the station cannot connect.
+  if (String(WIFI_SSID) == "YOUR_WIFI_SSID" || String(WIFI_PASSWORD) == "YOUR_WIFI_PASSWORD") {
+    Serial.println("[WiFi] ERROR: Update WIFI_SSID and WIFI_PASSWORD in config.h");
+  }
+
+  WiFi.persistent(false);      // Do not save credentials to flash
+  WiFi.mode(WIFI_STA);         // Ensure station mode
+  WiFi.disconnect(true, true); // Drop any half-open connection attempts
+
+  Serial.printf("[WiFi] Connecting to SSID '%s'...\n", WIFI_SSID);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 }
 
