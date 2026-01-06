@@ -4,7 +4,7 @@
 // ============================================================================
 
 #include <WiFi.h>
-#include <AsyncMqttClient.h>
+#include <AsyncMQTT_ESP32.h>
 #include <ArduinoJson.h>
 #include "config.h"
 
