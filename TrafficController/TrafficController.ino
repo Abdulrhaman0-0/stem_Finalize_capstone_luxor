@@ -3,6 +3,7 @@
 // Spec v1.2 - Smart Traffic Intersection with MQTT
 // ============================================================================
 
+#include <Arduino.h>
 #include <WiFi.h>
 #include <AsyncMQTT_ESP32.h>
 #include <ArduinoJson.h>
@@ -63,10 +64,19 @@ void setLEDs(bool a_red, bool a_green, bool b_red, bool b_green) {
 
 void setBuzzer(bool on) {
   if (on) {
+#if defined(ARDUINO_ESP32_VERSION_MAJOR) && ARDUINO_ESP32_VERSION_MAJOR >= 3
+    ledcWriteTone(PIN_BUZZER, BUZZER_FREQ);
+    ledcWrite(PIN_BUZZER, 128);  // 50% duty
+#else
     ledcWriteTone(BUZZER_CHANNEL, BUZZER_FREQ);
     ledcWrite(BUZZER_CHANNEL, 128);  // 50% duty
+#endif
   } else {
+#if defined(ARDUINO_ESP32_VERSION_MAJOR) && ARDUINO_ESP32_VERSION_MAJOR >= 3
+    ledcWrite(PIN_BUZZER, 0);
+#else
     ledcWrite(BUZZER_CHANNEL, 0);
+#endif
   }
 }
 
@@ -257,7 +267,8 @@ void handleEmergencyDetect(String payload) {
     return;
   }
   
-  String approach = doc["approach"] | "";
+  JsonObject obj = doc.as<JsonObject>();
+  String approach = obj["approach"] | "";
   if (approach != "A" && approach != "B") {
     Serial.println("[MQTT] Invalid approach in emergency");
     return;
@@ -309,21 +320,20 @@ void publishState() {
   lastStatePublishTime = now;
   
   StaticJsonDocument<256> doc;
+  JsonObject obj = doc.to<JsonObject>();
   
-  doc["phase"] = (currentPhase == PHASE_A_GREEN) ? "A_GREEN" : "B_GREEN";
-  doc["remaining_ms"] = (currentMode == MODE_NORMAL) ? max(0L, (long)(phaseEndTime - now)) : 0;
-  doc["queue_A"] = queueA;
-  doc["queue_B"] = queueB;
+  obj["phase"] = (currentPhase == PHASE_A_GREEN) ? "A_GREEN" : "B_GREEN";
+  obj["remaining_ms"] = (currentMode == MODE_NORMAL) ? max(0L, (long)(phaseEndTime - now)) : 0;
+  obj["queue_A"] = queueA;
+  obj["queue_B"] = queueB;
   
   if (currentMode == MODE_NORMAL) {
-    doc["mode"] = "NORMAL";
+    obj["mode"] = "NORMAL";
   } else if (currentMode == MODE_EMERGENCY) {
-    doc["mode"] = "EMERGENCY";
+    obj["mode"] = "EMERGENCY";
   } else {
-    doc["mode"] = "FAILSAFE";
+    obj["mode"] = "FAILSAFE";
   }
-  
-  doc["team_id"] = TEAM_ID;
   
   String output;
   serializeJson(doc, output);
@@ -339,8 +349,8 @@ void onMqttConnect(bool sessionPresent) {
   
   // Publish online status
   StaticJsonDocument<64> doc;
-  doc["status"] = "online";
-  doc["team_id"] = TEAM_ID;
+  JsonObject obj = doc.to<JsonObject>();
+  obj["status"] = "online";
   String output;
   serializeJson(doc, output);
   mqttClient.publish(TOPIC_SIGNAL_STATUS, 1, true, output.c_str());
@@ -370,20 +380,39 @@ void onMqttDisconnect(AsyncMqttClientDisconnectReason reason) {
 // ============================================================================
 void WiFiEvent(WiFiEvent_t event) {
   switch(event) {
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      Serial.println("[WiFi] Connected!");
+      Serial.print("[WiFi] IP: ");
+      Serial.println(WiFi.localIP());
+      xTimerStop(wifiReconnectTimer, 0);
+      xTimerStart(mqttReconnectTimer, 0);
+      break;
+
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      Serial.println("[WiFi] Disconnected!");
+      enterFailsafe();
+      xTimerStop(mqttReconnectTimer, 0);
+      xTimerStart(wifiReconnectTimer, 0);
+      break;
+
+#ifdef SYSTEM_EVENT_STA_GOT_IP
+    // Legacy aliases for older ESP32 core releases
     case SYSTEM_EVENT_STA_GOT_IP:
       Serial.println("[WiFi] Connected!");
       Serial.print("[WiFi] IP: ");
       Serial.println(WiFi.localIP());
+      xTimerStop(wifiReconnectTimer, 0);
       xTimerStart(mqttReconnectTimer, 0);
       break;
-      
+
     case SYSTEM_EVENT_STA_DISCONNECTED:
       Serial.println("[WiFi] Disconnected!");
       enterFailsafe();
       xTimerStop(mqttReconnectTimer, 0);
       xTimerStart(wifiReconnectTimer, 0);
       break;
-      
+#endif
+
     default:
       break;
   }
@@ -398,7 +427,24 @@ void connectToMqtt() {
 }
 
 void connectToWifi() {
-  Serial.println("[WiFi] Connecting...");
+  // Avoid the "wifi:sta is connecting, cannot set config" churn by ensuring we
+  // start from a clean STA state before reconnect attempts.
+  if (WiFi.isConnected()) {
+    Serial.println("[WiFi] Already connected - skipping new attempt");
+    return;
+  }
+
+  // Warn if the placeholder credentials are still present so the user gets a
+  // clear hint about why the station cannot connect.
+  if (String(WIFI_SSID) == "YOUR_WIFI_SSID" || String(WIFI_PASSWORD) == "YOUR_WIFI_PASSWORD") {
+    Serial.println("[WiFi] ERROR: Update WIFI_SSID and WIFI_PASSWORD in config.h");
+  }
+
+  WiFi.persistent(false);      // Do not save credentials to flash
+  WiFi.mode(WIFI_STA);         // Ensure station mode
+  WiFi.disconnect(true, true); // Drop any half-open connection attempts
+
+  Serial.printf("[WiFi] Connecting to SSID '%s'...\n", WIFI_SSID);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 }
 
@@ -418,8 +464,12 @@ void setup() {
   pinMode(PIN_B_GREEN, OUTPUT);
   
   // Buzzer PWM setup
+#if defined(ARDUINO_ESP32_VERSION_MAJOR) && ARDUINO_ESP32_VERSION_MAJOR >= 3
+  ledcAttach(PIN_BUZZER, BUZZER_FREQ, BUZZER_RESOLUTION);
+#else
   ledcSetup(BUZZER_CHANNEL, BUZZER_FREQ, BUZZER_RESOLUTION);
   ledcAttachPin(PIN_BUZZER, BUZZER_CHANNEL);
+#endif
   
   // Start in failsafe
   setFailsafeOutputs();
@@ -442,8 +492,8 @@ void setup() {
   
   // Set LWT (Last Will and Testament)
   StaticJsonDocument<64> lwtDoc;
-  lwtDoc["status"] = "offline";
-  lwtDoc["team_id"] = TEAM_ID;
+  JsonObject lwtObj = lwtDoc.to<JsonObject>();
+  lwtObj["status"] = "offline";
   String lwtPayload;
   serializeJson(lwtDoc, lwtPayload);
   mqttClient.setWill(TOPIC_SIGNAL_STATUS, 1, true, lwtPayload.c_str());
