@@ -64,10 +64,19 @@ void setLEDs(bool a_red, bool a_green, bool b_red, bool b_green) {
 
 void setBuzzer(bool on) {
   if (on) {
+#if defined(ARDUINO_ESP32_VERSION_MAJOR) && ARDUINO_ESP32_VERSION_MAJOR >= 3
+    ledcWriteTone(PIN_BUZZER, BUZZER_FREQ);
+    ledcWrite(PIN_BUZZER, 128);  // 50% duty
+#else
     ledcWriteTone(BUZZER_CHANNEL, BUZZER_FREQ);
     ledcWrite(BUZZER_CHANNEL, 128);  // 50% duty
+#endif
   } else {
+#if defined(ARDUINO_ESP32_VERSION_MAJOR) && ARDUINO_ESP32_VERSION_MAJOR >= 3
+    ledcWrite(PIN_BUZZER, 0);
+#else
     ledcWrite(BUZZER_CHANNEL, 0);
+#endif
   }
 }
 
@@ -258,7 +267,8 @@ void handleEmergencyDetect(String payload) {
     return;
   }
   
-  String approach = doc["approach"] | "";
+  JsonObject obj = doc.as<JsonObject>();
+  String approach = obj["approach"] | "";
   if (approach != "A" && approach != "B") {
     Serial.println("[MQTT] Invalid approach in emergency");
     return;
@@ -310,21 +320,20 @@ void publishState() {
   lastStatePublishTime = now;
   
   StaticJsonDocument<256> doc;
+  JsonObject obj = doc.to<JsonObject>();
   
-  doc["phase"] = (currentPhase == PHASE_A_GREEN) ? "A_GREEN" : "B_GREEN";
-  doc["remaining_ms"] = (currentMode == MODE_NORMAL) ? max(0L, (long)(phaseEndTime - now)) : 0;
-  doc["queue_A"] = queueA;
-  doc["queue_B"] = queueB;
+  obj["phase"] = (currentPhase == PHASE_A_GREEN) ? "A_GREEN" : "B_GREEN";
+  obj["remaining_ms"] = (currentMode == MODE_NORMAL) ? max(0L, (long)(phaseEndTime - now)) : 0;
+  obj["queue_A"] = queueA;
+  obj["queue_B"] = queueB;
   
   if (currentMode == MODE_NORMAL) {
-    doc["mode"] = "NORMAL";
+    obj["mode"] = "NORMAL";
   } else if (currentMode == MODE_EMERGENCY) {
-    doc["mode"] = "EMERGENCY";
+    obj["mode"] = "EMERGENCY";
   } else {
-    doc["mode"] = "FAILSAFE";
+    obj["mode"] = "FAILSAFE";
   }
-  
-  doc["team_id"] = TEAM_ID;
   
   String output;
   serializeJson(doc, output);
@@ -340,8 +349,8 @@ void onMqttConnect(bool sessionPresent) {
   
   // Publish online status
   StaticJsonDocument<64> doc;
-  doc["status"] = "online";
-  doc["team_id"] = TEAM_ID;
+  JsonObject obj = doc.to<JsonObject>();
+  obj["status"] = "online";
   String output;
   serializeJson(doc, output);
   mqttClient.publish(TOPIC_SIGNAL_STATUS, 1, true, output.c_str());
@@ -455,8 +464,12 @@ void setup() {
   pinMode(PIN_B_GREEN, OUTPUT);
   
   // Buzzer PWM setup
+#if defined(ARDUINO_ESP32_VERSION_MAJOR) && ARDUINO_ESP32_VERSION_MAJOR >= 3
+  ledcAttach(PIN_BUZZER, BUZZER_FREQ, BUZZER_RESOLUTION);
+#else
   ledcSetup(BUZZER_CHANNEL, BUZZER_FREQ, BUZZER_RESOLUTION);
   ledcAttachPin(PIN_BUZZER, BUZZER_CHANNEL);
+#endif
   
   // Start in failsafe
   setFailsafeOutputs();
@@ -479,8 +492,8 @@ void setup() {
   
   // Set LWT (Last Will and Testament)
   StaticJsonDocument<64> lwtDoc;
-  lwtDoc["status"] = "offline";
-  lwtDoc["team_id"] = TEAM_ID;
+  JsonObject lwtObj = lwtDoc.to<JsonObject>();
+  lwtObj["status"] = "offline";
   String lwtPayload;
   serializeJson(lwtDoc, lwtPayload);
   mqttClient.setWill(TOPIC_SIGNAL_STATUS, 1, true, lwtPayload.c_str());
